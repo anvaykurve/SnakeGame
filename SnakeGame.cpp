@@ -1,10 +1,64 @@
 #include <iostream>
 #include <vector>
-#include <conio.h>    // _kbhit(), _getch()
-#include <windows.h>  // Sleep(), SetConsoleCursorPosition()
-#include <ctime>      // time()
+#include <cstdlib>
+#include <ctime>
+#include <thread> // For sleep
+#include <chrono> // For sleep duration
+
+// Linux-specific headers for input handling
+#include <unistd.h>
+#include <termios.h>
+#include <fcntl.h>
 
 using namespace std;
+
+// --- Linux Input Utils ---
+// Implementation of _kbhit() for Linux
+int _kbhit(void) {
+    struct termios oldt, newt;
+    int ch;
+    int oldf;
+
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= ~(ICANON | ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+    oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
+    fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
+
+    ch = getchar();
+
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
+    fcntl(STDIN_FILENO, F_SETFL, oldf);
+
+    if (ch != EOF) {
+        ungetc(ch, stdin);
+        return 1;
+    }
+
+    return 0;
+}
+
+// Implementation of _getch() for Linux
+char _getch() {
+    char buf = 0;
+    struct termios old = {0};
+    if (tcgetattr(0, &old) < 0)
+        perror("tcsetattr()");
+    old.c_lflag &= ~ICANON;
+    old.c_lflag &= ~ECHO;
+    old.c_cc[VMIN] = 1;
+    old.c_cc[VTIME] = 0;
+    if (tcsetattr(0, TCSANOW, &old) < 0)
+        perror("tcsetattr ICANON");
+    if (read(0, &buf, 1) < 0)
+        perror("read()");
+    old.c_lflag |= ICANON;
+    old.c_lflag |= ECHO;
+    if (tcsetattr(0, TCSADRAIN, &old) < 0)
+        perror("tcsetattr ~ICANON");
+    return (buf);
+}
 
 // --- Utility Structure ---
 struct Point {
@@ -15,11 +69,10 @@ struct Point {
 };
 
 // --- Helper for Flicker-Free Rendering ---
+// Uses ANSI escape codes to move cursor
 void GoToXY(int x, int y) {
-    COORD c;
-    c.X = x;
-    c.Y = y;
-    SetConsoleCursorPosition(GetStdHandle(STD_OUTPUT_HANDLE), c);
+    // ANSI uses 1-based indexing (Row;Col)
+    cout << "\033[" << y + 1 << ";" << x + 1 << "H";
 }
 
 // --- Food Class ---
@@ -29,7 +82,7 @@ private:
     char symbol;
 
 public:
-    Food() : symbol('\242') { // Cent symbol or 'O'
+    Food() : symbol('*') { // Changed to standard ASCII '*'
         position = { 0, 0 };
     }
 
@@ -65,7 +118,7 @@ private:
 
 public:
     Snake(int startX, int startY) {
-        headChar = '\351'; // Theta or 'O'
+        headChar = 'O'; // Changed to standard ASCII 'O'
         bodyChar = 'o';
         Reset(startX, startY);
     }
@@ -141,11 +194,16 @@ public:
         HideCursor();
     }
 
+    ~Game() {
+        ShowCursor(); // Restore cursor on exit
+    }
+
     void HideCursor() {
-        CONSOLE_CURSOR_INFO cursorInfo;
-        cursorInfo.dwSize = 1;
-        cursorInfo.bVisible = FALSE;
-        SetConsoleCursorInfo(GetStdHandle(STD_OUTPUT_HANDLE), &cursorInfo);
+        cout << "\033[?25l"; // ANSI hide cursor
+    }
+    
+    void ShowCursor() {
+        cout << "\033[?25h"; // ANSI show cursor
     }
 
     void Setup() {
@@ -158,13 +216,13 @@ public:
     void ProcessInput() {
         if (_kbhit()) {
             switch (_getch()) {
-            case 'a': case 'A': case 75: // Left Arrow
+            case 'a': case 'A': 
                 snake.SetDirection(-1, 0); break;
-            case 'd': case 'D': case 77: // Right Arrow
+            case 'd': case 'D': 
                 snake.SetDirection(1, 0); break;
-            case 'w': case 'W': case 72: // Up Arrow
+            case 'w': case 'W': 
                 snake.SetDirection(0, -1); break;
-            case 's': case 'S': case 80: // Down Arrow
+            case 's': case 'S': 
                 snake.SetDirection(0, 1); break;
             case 'x': case 'X': 
                 gameOver = true; break;
@@ -180,8 +238,6 @@ public:
             score += 10;
             snake.Grow();
             food.Respawn(width, height, snake.GetBody());
-            // Optional: Increase speed slightly as game progresses
-            // if (speed > 50) speed -= 2;
         }
 
         if (snake.CheckCollision(width, height)) {
@@ -190,15 +246,16 @@ public:
     }
 
     void Draw() {
+        // Move cursor top-left rather than clearing screen (reduces flicker)
         GoToXY(0, 0);
 
         // Draw Top Border
-        for (int i = 0; i < width; i++) cout << "\262";
+        for (int i = 0; i < width; i++) cout << "#";
         cout << endl;
 
         // Draw Rows
         for (int i = 1; i < height - 1; i++) {
-            cout << "\262"; // Left Wall
+            cout << "#"; // Left Wall
             for (int j = 1; j < width - 1; j++) {
                 Point current = { j, i };
                 bool isPrinted = false;
@@ -227,32 +284,39 @@ public:
 
                 if (!isPrinted) cout << " ";
             }
-            cout << "\262"; // Right Wall
+            cout << "#"; // Right Wall
             cout << endl;
         }
 
         // Draw Bottom Border
-        for (int i = 0; i < width; i++) cout << "\262";
+        for (int i = 0; i < width; i++) cout << "#";
         cout << endl;
 
         // UI Info
         cout << "Score: " << score << "   \n";
-        cout << "Controls: WASD or Arrows | X to Quit";
+        cout << "Controls: WASD | X to Quit  ";
     }
 
     void Run() {
+        // Clear screen once at start
+        cout << "\033[2J"; 
+        
         Setup();
         while (!gameOver) {
             Draw();  
             ProcessInput();
             Update();
-            Sleep(speed);
+            // Portable C++ sleep
+            std::this_thread::sleep_for(std::chrono::milliseconds(speed));
         }
         
         GoToXY(width / 2 - 5, height / 2);
         cout << "GAME OVER!";
         GoToXY(0, height + 2);
-        system("pause");
+        
+        ShowCursor();
+        cout << "Press any key to exit...";
+        _getch();
     }
 };
 
